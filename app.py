@@ -1,75 +1,49 @@
 import streamlit as st
-from google import genai
-from elevenlabs.client import ElevenLabs
-from streamlit_gsheets import GSheetsConnection
-from io import BytesIO
+import yfinance as yf
+import plotly.graph_objects as go
+import pandas_ta as ta
 
-# Configure Page
-st.set_page_config(page_title="Jarvis OS", layout="centered")
+# Layout configuration
+st.set_page_config(layout="wide")
+st.title("Real-Time Stock Dashboard")
 
-# Initialize Connections
-conn = st.connection("gsheets", type=GSheetsConnection)
-client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
-xi_client = ElevenLabs(api_key=st.secrets["ELEVENLABS_API_KEY"])
+# Sidebar inputs
+ticker = st.sidebar.text_input("Ticker Symbol", "AAPL")
+period = st.sidebar.selectbox("Time Period", ["1d", "5d", "1mo", "3mo", "1y"])
+chart_type = st.sidebar.selectbox("Chart Type", ["Candlestick", "Line"])
+indicators = st.sidebar.multiselect("Indicators", ["SMA", "EMA"])
 
-st.title("Jarvis Command Terminal")
+# Data fetching function [00:01:15]
+def fetch_stock_data(ticker, period):
+    # Mapping periods to intervals as suggested in the video [00:02:49]
+    intervals = {"1d": "1m", "5d": "5m", "1mo": "1h", "3mo": "1d", "1y": "1d"}
+    df = yf.download(ticker, period=period, interval=intervals[period])
+    return df
 
-# --- Tactical Dashboard Metrics ---
-df = conn.read(worksheet="Sheet1", ttl="1m")
-latest = df.iloc[-1] if not df.empty else None
-
-col1, col2, col3 = st.columns(3)
-if latest is not None:
-    col1.metric("Symbol", latest['Symbol'])
-    col2.metric("Action", latest['BUY/SELL'])
-    col3.metric("Stop Loss", latest['Stop Loss'])
-else:
-    st.info("Awaiting market data from TradingView...")
-
-# --- Intelligence Function ---
-def get_latest_signal():
-    if latest is None: return "No active signals."
-    return f"""
-    - Symbol: {latest.get('Symbol', 'N/A')}
-    - Action: {latest.get('BUY/SELL', 'N/A')}
-    - Signal: {latest.get('Signal_Type', 'N/A')}
-    - Stop Loss: {latest.get('Stop Loss', 'N/A')}
-    - Notes: {latest.get('Strategy_Notes', 'N/A')}
-    """
-
-# --- Chat Interaction ---
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-
-for msg in st.session_state.messages:
-    with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
-
-if prompt := st.chat_input("Enter tactical command, sir..."):
-    with st.chat_message("user"):
-        st.markdown(prompt)
-    st.session_state.messages.append({"role": "user", "content": prompt})
+# UI logic with Update button [00:03:05]
+if st.sidebar.button("Update"):
+    data = fetch_stock_data(ticker, period)
     
-    # Brain Processing with Context
-    latest_intel = get_latest_signal()
-    contextual_prompt = f"Market Intelligence: {latest_intel}. User Command: {prompt}. Instructions: Reference specific levels from intelligence, be tactical, address user as 'sir'."
+    # Technical Indicators calculation [00:02:03]
+    if "SMA" in indicators:
+        data['SMA'] = ta.sma(data['Close'], length=20)
+    if "EMA" in indicators:
+        data['EMA'] = ta.ema(data['Close'], length=20)
+
+    # Metric Display [00:03:53]
+    last_price = data['Close'].iloc[-1]
+    st.metric("Current Price", f"{last_price:.2f}")
+
+    # Plotting logic [00:04:28]
+    fig = go.Figure()
+    if chart_type == "Candlestick":
+        fig.add_trace(go.Candlestick(x=data.index, open=data['Open'], high=data['High'], low=data['Low'], close=data['Close']))
+    else:
+        fig.add_trace(go.Scatter(x=data.index, y=data['Close'], mode='lines'))
     
-    response = client.models.generate_content(
-        model='gemini-2.5-flash',
-        contents=contextual_prompt,
-        config={"system_instruction": "You are Jarvis. Be precise, concise, and tactical."}
-    )
-    
-    msg = response.text
-    with st.chat_message("assistant"):
-        st.markdown(msg)
-    st.session_state.messages.append({"role": "assistant", "content": msg})
-    
-    # Audio Generation
-    audio_stream = xi_client.text_to_speech.convert(text=msg, voice_id="Brian")
-    audio_buffer = BytesIO()
-    for chunk in audio_stream:
-        if chunk: audio_buffer.write(chunk)
-    audio_buffer.seek(0)
-    st.audio(audio_buffer, format="audio/mpeg", autoplay=True)
+    # Overlay Indicators [00:04:40]
+    for ind in indicators:
+        fig.add_trace(go.Scatter(x=data.index, y=data[ind], name=ind))
+        
+    st.plotly_chart(fig, use_container_width=True)
     
